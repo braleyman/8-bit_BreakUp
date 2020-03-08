@@ -1,0 +1,411 @@
+// zero-page labels
+xv      .equ    $06       ; x-velocity (bit 8 determines direction pos or neg. bits 1-7 determine speed)
+                          ; default is 1 (0000 0001) indicating positive direction at 1 dot per move
+yv      .equ    $07       ; y-velocity (bit 8 determines direction pos or neg. bits 1-7 determine speed)
+                          ; default is 1 (0000 0001) indicating positive direction at 1 dot per move
+cx      .equ    $08       ; x-position (low byte)
+                          ; $09 will contain (high byte)
+cy      .equ    $19       ; y-position
+xmax    .equ    $EB       ; highest value for x coordinate
+xmin    .equ    $ED       ; lowest value for x coordinate
+ymax    .equ    $EE       ; highest value for y coordinate
+ymin    .equ    $EF       ; lowest value for y coordinate
+
+NOTES FOR DIRECTION AND SPEED (VELOCITY):
+
+    ***********************************************************************************************************************************************
+    ! I MAY HAVE GONE OVERBOARD BY DOING THINGS THIS WAY. I DON'T KNOW IF ANY OBJECTS WILL HAVE TO MOVE AT MORE THAN ONE PIXEL PER CYCLE.
+    ! IF I KNEW THE ONLY OBJECT ON THE SCREEN WAS GOING TO BE A BALL (DOT), I WOULD JUST USE A SIMPLE CMP TO DETECT COLLISION WITH THE BORDERS AND
+    ! ADJUST THE DELAY TO CONTROL THE BALL'S SPEED. MAYBE I NEED SOMETHING TO MOVE AT MORE THAN ONE PIXEL PER CYCLE?? I COULDN'T RELY ON THE SIMPLE
+    ! COLLISION CHECK IF AN OBJECT IS MOVING FASTER THAN ONE PIXEL PER CYCLE BECAUSE IT COULD (WOULD) FAIL.
+    !
+    ! I INSTEAD USE A FEW MORE PRECIOUS BYTES OF RAM TO DETECT IF AN OBJECT HAS JUMPED THE BOUNDARY OF THE SCREEN. IT WORKS JUST FINE.
+    ***********************************************************************************************************************************************
+
+    Using the 8th bit to determine direction 
+
+        10000001 (81) would indicate a negative direction so subtract one from x or y
+        00000001 (01) would indicate a positive direction so add one to x or y
+
+        we can determine neg/pos value by check bit 8 of xv or xy
+
+        example 1: This method is used in both x and y routines
+
+        lda xv          ; load a with bit mask 10000000
+        bpl [label]     ; bpl = the object is moving in a positive direction. 
+
+    Adding velocity to current x position
+    
+        When adding the speed to current x position....
+        
+        If the addition causes the low byte to flip, the carry flag will set
+        
+            Example Test:
+                
+                NV-BDIZC
+                00110001
+            
+                lda #$fc
+                clc
+                adc #$0f
+                
+       If the addition does NOT flip the low byte, the carry flag will NOT be set
+       
+            Example Test:
+            
+                NV-BDIZC
+                10110000
+                
+                lda #$fc
+                clc
+                adc #$02
+                
+     !!!!!  DO NOT RELY ON N-FLAG. NOT CONSISTENT OR REPRESENTATIVE OF THE ADD CONDITION !!!!!
+                
+NOTE FOR SBC:
+
+    When subtracting from low byte....
+
+    if cx is $00 and we subtract xv, the value of cx will flip
+    the Carry-Flag will be set to 0
+
+        Example test:
+        
+                lda #$01
+	            sta $00
+	            lda #$0a
+	            sta $01
+        again:  sec
+	            lda $01
+	            sbc $00
+	            sta $01
+	            tax 
+                jmp again
+
+    even after the value of cx flips, the N-Flag stays set so only work from Carry-Flag.
+
+    What this means for the high byte....
+
+NOTES FOR CHECKING HIGH BYTE:
+
+    Once the low byte flips, we need to check the high byte for $01
+    
+    
+        if we compare it to $01 and high byte is set to $01...
+        
+            NV-BDIZC
+            00110011
+
+            Example test:
+                lda #$01
+                cmp #$01
+
+        if we compare it to $01 and high byte is set to $00...
+        
+            NV-BDIZC
+            10110000
+
+            Example test:
+                lda #$00
+                cmp #$01
+                
+----------------------------------------------------------------------------------------------------
+LOGICAL FLOW FOR CALCULATING NEW X POSITION
+
+MOVEX               lda     xv              ; this is our bit mask to compare to xv
+                    bpl     incX            ; traveling in positive direction.incX
+                        
+    decX            sec                     ; beq failed. going in negative direction. 
+                                            ; set carry flag in prep. for subtraction
+                    lda     xv              ; retrieve velocity.
+                    and     #$7f            ; mask off the 8th bit (only use 1-7 for velocity)
+                    sta     vtemp           ; store masked xv value to zero-page.
+                    lda     cx              ; retrieve low byte of x posn
+                    sbc     vtemp           ; Subtract x velocity from x posn
+                    sta     cx              ; store low byte calculation to cx
+                    bcs     endXmove        ; carry set. Exit subroutine
+                    lda     cx+1            ; retrieve high byte of x posn
+                    sec
+                    sbc     #$01            ; subtract one from high byte
+                    sta     cx+1            ; store new value for high byte
+                    jmp     endXmove        ; done. exit subroutine
+
+    incX            lda     cx              ; Get cx low byte
+                    clc                     ; Make sure carry flag is not set
+                    adc     xv              ; Add velocity to A-register
+                    sta     cx              ; Store new value for low byte
+                    bcc     endXmove        ; No carry set. Exit subroutine
+                    lda     cx+1            ; retrieve high byte of x posn
+                    adc     #$00            ; add carry to high bit. 
+                    sta     cx+1            ; store new value for high byte
+                        
+    endXmove        rts                     ; Done. Next check is for collision with xmax.
+
+NOTE: Tested the above script on 1/31/2020 and verified working
+
+----------------------------------------------------------------------------------------------------
+LOGICAL FLOW FOR CALCULATING NEW Y POSITION AND COLLISION DETECTION
+    
+MOVEY               ldx     cy              ; grab y posn
+                    ldy     yv              ; grab y velocity
+                    bpl     incY            ; traveling in positive direction.
+    decY            tya                     ; retrieve velocity.
+                    and     #$7f            ; mask off the 8th bit (only use 1-7 for velocity)
+                    sta     vtemp           ; store masked yv value to zero-page.
+                    txa                     ; retrieve y posn
+                    sec
+                    sbc     vtemp           ; Subtract y-velocity from y posn
+                    tax                     ; store new y posn in x register
+                    cmp     #$80            ; easier to detect collision when not negative
+                    bpl     endYmove        ; 
+                    sec                     ;
+                    sbc     vtemp
+                    bpl     endYmove        ; 
+    YcollideT:      lda     #$01            ; reset cy to 1
+                    tax                     ; send new y posn to x register
+                    tya                     ; get y velocity from y register
+                    sec
+                    sbc     #$80            ; time to go in a positive directionb
+                    tay                     ; send new y velocity to y-register
+                    jmp     endYmove        ; done. exit subroutine
+
+    incY            txa                     ; Get y posn from x register
+                    clc
+                    adc     yv              ; add velocity to y position
+                    tax
+                    cmp     #$80            ; easier to detect collision when bpl
+                    bmi     endYmove        ; don't care right now if bmi.
+    YcollideB:      cmp     ymax            ; check to see if we've collided
+                    bmi     endYmove        ; bpl means we exceeded ymax
+                    lda     #$9e
+                    tax                     ; Store new y posn
+                    tya                     ; get y velocity from y register
+                    clc
+                    adc     #$80            ; time to move in a negative direction
+                    tay                     ; send new y velocity to y register                       
+    endYmove        stx     cy              ; save new y posn
+                    sty     yv              ; save y velocity
+                    rts                     ; Done.
+
+NOTE: Test above code on 1/31/2020 and it works fine.
+      - combined old YCOLLISIONCHK routine with the MOVEY routine
+      - decided to not leave the A register to do the lion's share of the work. Incorporated use of X and Y registers
+
+----------------------------------------------------------------------------------------------------
+LOGICAL FLOW FOR X-COLLISION DETECTION
+
+(Quick though: This should be adapted to detect collision with any object... in the future)
+
+pseudo flow for edge collision....
+
+    direction = bit check of xv with $80
+    if (bne){
+        if (cx+1 === #$00){                 ; cmp #$00, Zero-Flag is set
+            if (cx < #$01){                 ; seems best to use Carry-Flag for this check
+                xv -= #$80
+                cx+1 = #$00
+                cx = #$01
+                rts
+            }
+        }
+    } else must be going right || beq {     
+        if (cx+1 === #$01){                 ; cmp #$01, Zero-Flag is set
+            if (cx >= #$16){                ; seems best to use Carry-Flag for this check
+                xv += #$80
+                cx+1 = #$01
+                cx = #$15
+                rts
+            }
+        }
+        rts
+    }
+The above didn't work at all if the velocity of the dot was greater than 1, so here's the fix...
+
+    direction = bit check of xv with $80
+    if (bne){
+        if (cx+1 === #$ff){                 ; testing for zero doesn't work with speed > 1
+            if (cx - #$80 === N-Flag){      ; BMI if less than 80. flipping back to ff is collision
+                xv -= #$80
+                cx+1 = #$00
+                cx = #$01
+                rts
+            }
+        }
+    } else must be going right || beq {     
+        if (cx+1 === #$01){                 ; cmp #$01, Zero-Flag is set
+            if (cx >= #$16){                ; carry set means we passed the right edge
+                xv += #$80
+                cx+1 = #$01
+                cx = #$15
+                rts
+            }
+        }
+        rts
+    }
+
+ASSEMBLY....
+
+    COLLISIONCHK:   lda     #$80            ; this is our bit mask to compare to xv
+                    bit     xv              ; impose mask on memory location of xv
+                    beq     chkRight        ; no match. traveling in positive direction.
+                                            ; check for collision with right side of screen.
+    chkLeft:        lda     cx+1            ; retrieve high byte of x posn
+                    cmp     #$ff            ; 
+                    bne     endXcolChk      ; no collision
+                    lda     cx              ; retrieve low byte of x posn
+                    cmp     #$80            ; less than 80 is negative. passing 00 will flip positive.
+                    bmi     endXcolChk      ; no collision
+    collideL:       lda     xv              ; retrieve velocity
+                    sec
+                    sbc     #$80            ; change xv to positive direction
+                    sta     xv
+                    lda     #$00
+                    sta     cx+1            ; ensure high byte is set to min
+                    lda     #$01
+                    sta     cx              ; set low byte to one pixel greater than min
+                    jmp     endXcolChk      ; Done.
+    chkRight:       lda     cx+1            ; retrieve high byte of x posn
+                    cmp     #$01            ; if Z-flag, need to check low byte
+                    bne     endXcolChk      ; no collision
+                    lda     cx              ; retrieve low byte of x posn
+                    cmp     #$16            ; have we hit or exceeded right edge?
+                    bcc     endXcolChk      ; no collision. Carry set means we passed the right edge.
+    collideR:       lda     xv              ; retrieve velocity
+                    clc
+                    adc     #$80            ; change xv to negative direction
+                    sta     xv
+                    lda     #$01
+                    sta     cx+1            ; ensure high byte is set to max
+                    lda     #$15
+                    sta     cx              ; set low byte to one pixel less than max
+    endXcolChk:     rts
+
+--------------------------------------------------------------------------------------------------------
+Going to try a mash-up of move x and collision check
+                   
+MOVEX                              
+                    lda     #$80            ; this is our bit mask to compare to xv
+                    bit     xv              ; impose mask on memory location of xv
+                    beq     incX            ; no match. traveling in positive direction.
+                                            ; need to add velocity to low byte of cx.
+                        
+    decX            sec                     ; beq failed. going in negative direction. 
+                                            ; set carry flag in prep. for subtraction
+                    lda     xv              ; retrieve velocity.
+                    and     #$7f            ; mask off the 8th bit (only use 1-7 for velocity)
+                    sta     vtemp           ; store masked xv value to zero-page.
+                    lda     cx              ; retrieve low byte of x posn
+                    sbc     vtemp           ; Subtract x velocity from x posn
+                    sta     cx              ; store low byte calculation to cx
+                    bcs     endXmove        ; carry set. Exit subroutine
+                    lda     cx+1            ; retrieve high byte of x posn
+                    sec
+                    sbc     #$01            ; subtract one from high byte
+                    sta     cx+1            ; store new value for high byte
+    chkXLeft        cmp     #$ff            ; if Z-Flag, need to check low byte
+                    bne     endXmove        ; no collision
+                    lda     cx              ; retrieve low byte of x posn
+                    cmp     #$80            ; less than 80 is negative. passing 00 will flip positive.
+                    bmi     endXmove        ; no collision
+    XcollideL       lda     xv              ; retrieve velocity
+                    sec
+                    sbc     #$80            ; change xv to positive direction
+                    sta     xv
+                    lda     #$00
+                    sta     cx+1            ; ensure high byte is set to min
+                    lda     #$01
+                    sta     cx              ; set low byte to one pixel greater than min
+                    jmp     endXmove        ; Done.
+    incX            lda     cx              ; Get cx low byte
+                    clc                     ; Make sure carry flag is not set
+                    adc     xv              ; Add velocity to A-register
+                    sta     cx              ; Store new value for low byte
+                    bcc     endXmove        ; No carry set. Exit subroutine
+                    lda     cx+1            ; retrieve high byte of x posn
+                    adc     #$00            ; add carry to high bit. 
+                    sta     cx+1            ; store new value for high byte
+    chkXRight       cmp     #$01            ; if Z-flag, need to check low byte 
+                    bne     endXmove        ; no collision
+                    lda     cx              ; retrieve low byte of x posn
+                    cmp     #$16            ; have we hit or exceeded right edge?
+                    bcc     endXmove        ; no collision. Carry set means we passed the right edge.
+    XcollideR       lda     xv              ; retrieve velocity
+                    clc
+                    adc     #$80            ; change xv to negative direction
+                    sta     xv
+                    lda     #$01
+                    sta     cx+1            ; ensure high byte is set to max
+                    lda     #$15
+                    sta     cx              ; set low byte to one pixel less than max    
+    endXmove        rts                     ; Done. Next check is for collision with xmax.
+
+
+ORIGINAL MOVEX and XCOLLISIONCHK from first iteration, on 1/27/2020
+
+MOVEX               lda     #$80            ; this is our bit mask to compare to xv
+                    bit     xv              ; impose mask on memory location of xv
+                    beq     incX            ; no match. traveling in positive direction.
+                                            ; need to add velocity to low byte of cx.
+                        
+    decX            sec                     ; beq failed. going in negative direction. 
+                                            ; set carry flag in prep. for subtraction
+                    lda     xv              ; retrieve velocity.
+                    and     #$7f            ; mask off the 8th bit (only use 1-7 for velocity)
+                    sta     vtemp           ; store masked xv value to zero-page.
+                    lda     cx              ; retrieve low byte of x posn
+                    sbc     vtemp           ; Subtract x velocity from x posn
+                    sta     cx              ; store low byte calculation to cx
+                    bcs     endXmove        ; carry set. Exit subroutine
+                    lda     cx+1            ; retrieve high byte of x posn
+                    sec
+                    sbc     #$01            ; subtract one from high byte
+                    sta     cx+1            ; store new value for high byte
+                    jmp     endXmove           ; done. exit subroutine
+
+    incX            lda     cx              ; Get cx low byte
+                    clc                     ; Make sure carry flag is not set
+                    adc     xv              ; Add velocity to A-register
+                    sta     cx              ; Store new value for low byte
+                    bcc     endXmove        ; No carry set. Exit subroutine
+                    lda     cx+1            ; retrieve high byte of x posn
+                    adc     #$00            ; add carry to high bit. 
+                    sta     cx+1            ; store new value for high byte
+                        
+    endXmove        rts                     ; Done. Next check is for collision with xmax.
+
+XCOLLISIONCHK:      lda     #$80            ; this is our bit mask to compare to xv
+                    bit     xv              ; impose mask on memory location of xv
+                    beq     chkXRight       ; no match. traveling in positive direction.
+                                            ; check for collision with right side of screen.
+    chkXLeft:       lda     cx+1            ; retrieve high byte of x posn
+                    cmp     #$ff            ; if Z-Flag, need to check low byte
+                    bne     endXcolChk      ; no collision
+                    lda     cx              ; retrieve low byte of x posn
+                    cmp     #$80            ; less than 80 is negative. passing 00 will flip positive.
+                    bmi     endXcolChk      ; no collision
+    XcollideL:      lda     xv              ; retrieve velocity
+                    sec
+                    sbc     #$80            ; change xv to positive direction
+                    sta     xv
+                    lda     #$00
+                    sta     cx+1            ; ensure high byte is set to min
+                    lda     #$01
+                    sta     cx              ; set low byte to one pixel greater than min
+                    jmp     endXcolChk      ; Done.
+    chkXRight:      lda     cx+1            ; retrieve high byte of x posn
+                    cmp     #$01            ; if Z-flag, need to check low byte
+                    bne     endXcolChk      ; no collision
+                    lda     cx              ; retrieve low byte of x posn
+                    cmp     #$16            ; have we hit or exceeded right edge?
+                    bcc     endXcolChk      ; no collision. Carry set means we passed the right edge.
+    XcollideR:      lda     xv              ; retrieve velocity
+                    clc
+                    adc     #$80            ; change xv to negative direction
+                    sta     xv
+                    lda     #$01
+                    sta     cx+1            ; ensure high byte is set to max
+                    lda     #$15
+                    sta     cx              ; set low byte to one pixel less than max
+    endXcolChk:     rts
+    
+    
