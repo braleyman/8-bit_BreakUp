@@ -9,4 +9,4 @@ The files for the debugger are also in the directory. No, I do not want to use a
 
 Once the debugger is complete, I'll use it to help continue developing the game.
 
-The code is being written using the VSC IDE and Retro Assembler plug-in.
+The code is being written using the VSC IDE and Peter Tihanyi's Retro Assembler.
